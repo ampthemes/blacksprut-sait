@@ -2,76 +2,76 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const SITE_URL = (
-  process.env.SITE_URL || "http://blacksprut-sait.top"
-).replace(/\/+$/, "");
+const ROOT = process.cwd();
+const DIST = path.join(ROOT, "dist");
+const SITE_URL = (process.env.SITE_URL || "").replace(/\/+$/, "");
 
-const ROOT_DIR = process.env.SITE_DIR || ".";
-const OUTPUT_FILE = path.join(ROOT_DIR, "sitemap.xml");
+if (!SITE_URL) {
+  throw new Error("SITE_URL belum diatur!");
+}
 
-const EXCLUDED_DIRS = new Set([
-  ".git",
-  ".github",
-  ".wrangler",
-  "node_modules",
-  "functions"
-]);
+// Bersihkan folder hasil build
+fs.rmSync(DIST, { recursive: true, force: true });
+fs.mkdirSync(DIST, { recursive: true });
 
-const EXCLUDED_FILES = new Set([
-  "404.html",
-  "sitemap.xml",
-  "generate-sitemap.mjs"
-]);
+// Salin semua file website ke dist
+fs.cpSync(ROOT, DIST, {
+  recursive: true,
+  preserveTimestamps: true,
+  filter(source) {
+    const relative = path.relative(ROOT, source);
+    if (!relative) return true;
+
+    const first = relative.split(path.sep)[0];
+
+    return ![
+      ".git",
+      "node_modules",
+      ".wrangler",
+      "dist",
+      "functions"
+    ].includes(first);
+  }
+});
 
 function escapeXml(value) {
-  return value.replace(/[<>&'"]/g, char => ({
+  return value.replace(/[<>&'"]/g, c => ({
     "<": "&lt;",
     ">": "&gt;",
     "&": "&amp;",
     "'": "&apos;",
     '"': "&quot;"
-  })[char]);
+  })[c]);
 }
 
-function encodePath(value) {
-  return value
-    .split("/")
-    .map(segment => encodeURIComponent(segment))
-    .join("/");
-}
-
-function scanDirectory(directory, results = []) {
-  const entries = fs.readdirSync(directory, {
+function scan(dir, results = []) {
+  for (const entry of fs.readdirSync(dir, {
     withFileTypes: true
-  });
-
-  for (const entry of entries) {
-    if (entry.name.startsWith(".")) continue;
-
-    const fullPath = path.join(directory, entry.name);
+  })) {
+    const file = path.join(dir, entry.name);
 
     if (entry.isDirectory()) {
-      if (EXCLUDED_DIRS.has(entry.name)) continue;
-      scanDirectory(fullPath, results);
+      scan(file, results);
       continue;
     }
 
-    if (!entry.isFile()) continue;
-    if (!entry.name.toLowerCase().endsWith(".html")) continue;
-    if (EXCLUDED_FILES.has(entry.name.toLowerCase())) continue;
+    if (!entry.isFile() || !/\.html$/i.test(entry.name)) continue;
+    if (entry.name.toLowerCase() === "404.html") continue;
 
-    const html = fs.readFileSync(fullPath, "utf8");
+    const html = fs.readFileSync(file, "utf8");
+    const metas = html.match(/<meta\b[^>]*>/gi) || [];
 
-    if (/<meta\b[^>]*name=["'](?:robots|googlebot)["'][^>]*content=["'][^"']*noindex/i.test(html)) {
-      continue;
-    }
+    const noindex = metas.some(tag =>
+      /\bname=["'](?:robots|googlebot)["']/i.test(tag) &&
+      /\bcontent=["'][^"']*\bnoindex\b/i.test(tag)
+    );
 
-    const relativePath = path.relative(
-      ROOT_DIR,
-      fullPath
-    ).split(path.sep).join("/");
+    if (noindex) continue;
 
-    let urlPath = relativePath;
+    const relative = path.relative(DIST, file)
+      .split(path.sep).join("/");
+
+    let urlPath = relative;
 
     if (urlPath === "index.html") {
       urlPath = "";
@@ -79,38 +79,32 @@ function scanDirectory(directory, results = []) {
       urlPath = urlPath.slice(0, -"index.html".length);
     }
 
-    const url = SITE_URL + "/" + encodePath(urlPath);
+    const loc = SITE_URL + "/" +
+      urlPath.split("/").map(encodeURIComponent).join("/");
 
-    const lastmod = fs.statSync(fullPath)
-      .mtime.toISOString().split("T")[0];
+    const lastmod = fs.statSync(file)
+      .mtime.toISOString().slice(0, 10);
 
-    results.push({ url, lastmod });
+    results.push({ loc, lastmod });
   }
 
   return results;
 }
 
-const pages = scanDirectory(ROOT_DIR);
+const pages = scan(DIST);
+pages.sort((a, b) => a.loc.localeCompare(b.loc));
 
-pages.sort((a, b) => a.url.localeCompare(b.url));
-
-const urls = pages.map(page => `
-  <url>
-    <loc>${escapeXml(page.url)}</loc>
-    <lastmod>${page.lastmod}</lastmod>
-  </url>`).join("");
-
-const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${urls}
-</urlset>
-`;
+${pages.map(page => `  <url>
+    <loc>${escapeXml(page.loc)}</loc>
+    <lastmod>${page.lastmod}</lastmod>
+  </url>`).join("\n")}
+</urlset>`;
 
-fs.writeFileSync(OUTPUT_FILE, sitemap, "utf8");
+fs.writeFileSync(path.join(DIST, "sitemap.xml"), xml);
 
-console.log("================================");
-console.log(" SITEMAP GENERATED SUCCESSFULLY");
-console.log("================================");
-console.log("Domain :", SITE_URL);
-console.log("Pages  :", pages.length);
-console.log("Output :", OUTPUT_FILE);
+console.log("SITEMAP BERHASIL DIBUAT");
+console.log("Domain:", SITE_URL);
+console.log("Total URL:", pages.length);
+console.log("Output: dist/sitemap.xml");
